@@ -49,6 +49,26 @@ def init_db():
                 error         TEXT,
                 uploaded_at   TEXT DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS leads (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                candidate_id    TEXT NOT NULL,
+                source          TEXT NOT NULL,             -- adzuna | remoteok | company_manual
+                external_id     TEXT,                      -- source's own id -- dedup key alongside source
+                title           TEXT NOT NULL,
+                company         TEXT NOT NULL,
+                location        TEXT,
+                description     TEXT,
+                url             TEXT,
+                posted_at       TEXT,
+                score           REAL NOT NULL,
+                matched_skills  TEXT,                      -- JSON array
+                reasons         TEXT,                      -- JSON array, human-readable "why this scored well"
+                status          TEXT DEFAULT 'new',         -- new | approved | rejected | expired | contacted
+                found_at        TEXT DEFAULT CURRENT_TIMESTAMP,
+                decided_at      TEXT,                       -- when user approved/rejected -- drives the 48h expiry check
+                UNIQUE(source, external_id, candidate_id)    -- re-running a search won't duplicate the same posting
+            );
         """)
 
 
@@ -93,4 +113,52 @@ def set_b2_key(upload_id: int, b2_key: str):
         conn.execute(
             "UPDATE resume_uploads SET b2_key = ? WHERE id = ?",
             (b2_key, upload_id),
+        )
+
+
+def save_lead(candidate_id: str, scored_lead) -> int | None:
+    """Insert a scored lead. Returns None (not an error) if it's a dupe of
+    a lead already found for this candidate -- re-running lead_finder
+    shouldn't flood the approval queue with postings already seen."""
+    lead = scored_lead.lead
+    with get_conn() as conn:
+        try:
+            cur = conn.execute(
+                """INSERT INTO leads
+                   (candidate_id, source, external_id, title, company, location,
+                    description, url, posted_at, score, matched_skills, reasons, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    candidate_id, lead.source, lead.external_id, lead.title, lead.company,
+                    lead.location, lead.description, lead.url, lead.posted_at,
+                    scored_lead.score, json.dumps(scored_lead.matched_skills),
+                    json.dumps(scored_lead.reasons), scored_lead.status,
+                ),
+            )
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            # UNIQUE(source, external_id, candidate_id) tripped -- already have this one
+            return None
+
+
+def get_leads(candidate_id: str, status: str = None) -> list[dict]:
+    with get_conn() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM leads WHERE candidate_id = ? AND status = ? ORDER BY score DESC",
+                (candidate_id, status),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM leads WHERE candidate_id = ? ORDER BY score DESC",
+                (candidate_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_lead_status(lead_id: int, status: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE leads SET status = ?, decided_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, lead_id),
         )

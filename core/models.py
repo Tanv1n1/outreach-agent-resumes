@@ -35,6 +35,34 @@ class Project:
 
 
 @dataclass
+class JobLead:
+    """A single job posting or company-fit lead, before scoring.
+    source distinguishes where it came from -- matters later for
+    dedup logic and for knowing which dispatch path applies (a company
+    lead with no posted role needs a colder outreach message than a
+    lead sourced from an actual job posting)."""
+    source: str                # "adzuna" | "remoteok" | "company_manual" etc.
+    title: str
+    company: str
+    location: str = ""
+    description: str = ""
+    url: str = ""
+    posted_at: str = ""
+    external_id: str = ""      # source's own id, used for de-duping re-runs
+
+
+@dataclass
+class ScoredLead:
+    """JobLead + score, ready to persist and show to the user for approval."""
+    lead: JobLead
+    score: float                # 0-100
+    matched_skills: list[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+    candidate_id: str = ""
+    status: str = "new"         # new | approved | rejected | expired | contacted
+
+
+@dataclass
 class CandidateProfile:
     """
     Output of resume_parser. This is the single source of truth that

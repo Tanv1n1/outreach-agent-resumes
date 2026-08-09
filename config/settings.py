@@ -19,5 +19,23 @@ B2_KEY_ID = os.environ.get("B2_KEY_ID")
 B2_APPLICATION_KEY = os.environ.get("B2_APPLICATION_KEY")
 B2_BUCKET_NAME = os.environ.get("B2_BUCKET_NAME", "outreach-agent-resumes")
 
+# --- Job boards (lead_finder) ---
+ADZUNA_APP_ID = os.environ.get("ADZUNA_APP_ID")
+ADZUNA_APP_KEY = os.environ.get("ADZUNA_APP_KEY")
+ADZUNA_COUNTRY = os.environ.get("ADZUNA_COUNTRY", "in")   # 'in' = India; Adzuna uses ISO country codes per-endpoint
+
+# Roles searched by default when scoring is set to "broad" mode -- i.e.
+# match on skills/domain overlap, not just exact title. Extend this list
+# rather than hardcoding elsewhere if new adjacent roles come up.
+DEFAULT_ROLE_QUERIES = [
+    "Product Manager",
+    "Associate Product Manager",
+    "Product Owner",
+    "Product Operations",
+    "Program Manager",
+    "Business Analyst",
+    "Technical Product Manager",
+]
+
 # --- Local paths ---
 LOCAL_UPLOAD_DIR = os.environ.get("LOCAL_UPLOAD_DIR", "data/uploads")  # scratch space before B2 upload
