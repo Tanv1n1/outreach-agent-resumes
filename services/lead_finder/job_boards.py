@@ -1,22 +1,14 @@
 """
-Job board clients. Both are legitimate APIs, not scrapers -- Adzuna
-requires a free API key (https://developer.adzuna.com), RemoteOK's JSON
-feed is publicly documented and requires no auth.
+Job board clients. All sources use legitimate APIs, RSS feeds, or public JSON
+endpoints -- no web scraping involved.
 
-Deliberately NOT scraping LinkedIn/Naukri/Indeed here -- against their
-ToS and a real ban/legal risk. If more coverage is needed later, the
-right next additions are Greenhouse/Lever public job-board JSON APIs
-(most startups already expose these, no scraping involved), added in
-company_finder.py rather than here since they're per-company, not a
-blanket search.
-
-Every function returns list[JobLead] -- the caller (finder.py) doesn't
-need to know which source it came from beyond what's already on the
-JobLead itself.
+Every function returns list[JobLead] so caller (finder.py) gets uniform
+data structures.
 """
 
 import logging
 import requests
+import xml.etree.ElementTree as ET
 
 from core.models import JobLead
 from config import settings
@@ -25,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 ADZUNA_BASE_URL = "https://api.adzuna.com/v1/api/jobs"
 REMOTEOK_URL = "https://remoteok.com/api"
+WWR_PRODUCT_RSS = "https://weworkremotely.com/categories/remote-product-jobs.rss"
+JOBICY_URL = "https://jobicy.com/api/v2/remote-jobs"
 
 
 def search_adzuna(query: str, location: str = "", max_results: int = 20) -> list[JobLead]:
@@ -66,10 +60,6 @@ def search_adzuna(query: str, location: str = "", max_results: int = 20) -> list
 
 
 def _fetch_remoteok_feed() -> list[dict]:
-    """Fetches RemoteOK's full recent-postings feed once. Filtered
-    per-query by _filter_remoteok_jobs rather than re-fetched, since the
-    API has no server-side query param and hitting it once per role
-    query (7+ times in a single lead_finder run) would be wasteful."""
     try:
         resp = requests.get(
             REMOTEOK_URL,
@@ -82,7 +72,7 @@ def _fetch_remoteok_feed() -> list[dict]:
         return []
 
     jobs = resp.json()
-    if jobs and "legal" in jobs[0]:  # first element is feed metadata, not a job
+    if jobs and "legal" in jobs[0]:
         jobs = jobs[1:]
     return jobs
 
@@ -118,15 +108,120 @@ def search_remoteok(query: str, max_results: int = 20, _feed_cache: list[dict] =
     return leads
 
 
+def _fetch_wwr_feed() -> list[dict]:
+    try:
+        resp = requests.get(
+            WWR_PRODUCT_RSS,
+            headers={"User-Agent": "outreach-agent/1.0"},
+            timeout=15
+        )
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        items = []
+        for item in root.findall("./channel/item"):
+            items.append({
+                "raw_title": item.findtext("title", ""),
+                "link": item.findtext("link", ""),
+                "description": item.findtext("description", ""),
+                "pubDate": item.findtext("pubDate", "")
+            })
+        return items
+    except Exception as e:
+        logger.warning("WeWorkRemotely fetch failed: %s", e)
+        return []
+
+
+def search_weworkremotely(query: str, max_results: int = 20, _feed_cache: list[dict] = None) -> list[JobLead]:
+    items = _feed_cache if _feed_cache is not None else _fetch_wwr_feed()
+    query_lower = query.lower()
+    leads = []
+
+    for item in items:
+        haystack = f"{item['raw_title']} {item['description']}".lower()
+        if query_lower not in haystack:
+            continue
+
+        raw_title = item['raw_title']
+        company, title = "Unknown", raw_title
+        if " is hiring a " in raw_title:
+            company, title = raw_title.split(" is hiring a ", 1)
+        elif ":" in raw_title:
+            company, title = raw_title.split(":", 1)
+
+        leads.append(JobLead(
+            source="weworkremotely",
+            external_id=item['link'],
+            title=title.strip(),
+            company=company.strip(),
+            location="Remote",
+            description=item['description'],
+            url=item['link'],
+            posted_at=item['pubDate'],
+        ))
+        if len(leads) >= max_results:
+            break
+
+    logger.info("WeWorkRemotely: %d results for '%s'", len(leads), query)
+    return leads
+
+
+def _fetch_jobicy_feed() -> list[dict]:
+    try:
+        resp = requests.get(
+            JOBICY_URL,
+            params={"count": 50},
+            headers={"User-Agent": "outreach-agent/1.0"},
+            timeout=15
+        )
+        resp.raise_for_status()
+        return resp.json().get("jobs", [])
+    except Exception as e:
+        logger.warning("Jobicy fetch failed: %s", e)
+        return []
+
+
+def search_jobicy(query: str, max_results: int = 20, _feed_cache: list[dict] = None) -> list[JobLead]:
+    jobs = _feed_cache if _feed_cache is not None else _fetch_jobicy_feed()
+    query_lower = query.lower()
+    leads = []
+
+    for job in jobs:
+        haystack = " ".join([
+            job.get("jobTitle", ""),
+            job.get("jobExcerpt", ""),
+            job.get("companyName", ""),
+            job.get("jobCategory", "")
+        ]).lower()
+        if query_lower not in haystack:
+            continue
+
+        leads.append(JobLead(
+            source="jobicy",
+            external_id=str(job.get("id", "")),
+            title=job.get("jobTitle", "").strip(),
+            company=job.get("companyName", "Unknown"),
+            location=job.get("jobGeo", "Remote"),
+            description=job.get("jobExcerpt", ""),
+            url=job.get("url", ""),
+            posted_at=job.get("pubDate", ""),
+        ))
+        if len(leads) >= max_results:
+            break
+
+    logger.info("Jobicy: %d results for '%s'", len(leads), query)
+    return leads
+
+
 def search_all_boards(queries: list[str], location: str = "", max_results_per_board: int = 20) -> list[JobLead]:
-    """Queries every configured board across a list of role queries.
-    Failures in one board don't block the others (each search_* function
-    already catches its own request errors). RemoteOK's feed is fetched
-    once and reused across all queries, not re-fetched per query."""
     leads = []
     remoteok_feed = _fetch_remoteok_feed()
+    wwr_feed = _fetch_wwr_feed()
+    jobicy_feed = _fetch_jobicy_feed()
 
     for query in queries:
         leads.extend(search_adzuna(query, location, max_results_per_board))
         leads.extend(search_remoteok(query, max_results_per_board, _feed_cache=remoteok_feed))
+        leads.extend(search_weworkremotely(query, max_results_per_board, _feed_cache=wwr_feed))
+        leads.extend(search_jobicy(query, max_results_per_board, _feed_cache=jobicy_feed))
+
     return leads
