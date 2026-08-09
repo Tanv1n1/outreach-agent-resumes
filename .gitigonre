@@ -1,0 +1,18 @@
+# Environment & Secrets
+.env
+
+# Local Data & Uploads
+data/agent.db
+data/uploads/*
+!data/uploads/.gitkeep
+
+# Python Cache & Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# IDE Settings
+.vscode/
+.idea/
