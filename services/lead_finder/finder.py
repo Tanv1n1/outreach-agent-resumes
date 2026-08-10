@@ -10,6 +10,7 @@ from core import db
 from core.models import CandidateProfile, ScoredLead
 from config import settings
 from services.lead_finder.job_boards import search_all_boards
+from services.lead_finder.company_boards import search_watched_companies
 from services.lead_finder.scorer import score_lead
 
 logger = logging.getLogger(__name__)
@@ -22,11 +23,12 @@ def find_leads(
     role_queries: list[str] = None,
     location: str = "",
     max_per_query: int = 15,
+    include_company_boards: bool = True,
 ) -> list[ScoredLead]:
-    """Searches all configured job boards across role_queries (defaults to
-    settings.DEFAULT_ROLE_QUERIES for broad matching), scores every result
-    against the profile, persists new ones, and returns everything above
-    MIN_SCORE_TO_KEEP sorted best-first.
+    """Searches job boards (Adzuna/RemoteOK/WeWorkRemotely/Jobicy) across
+    role_queries, plus every company in config/watched_companies.json
+    (Greenhouse/Lever), scores everything against the profile, persists
+    new ones, returns everything above MIN_SCORE_TO_KEEP sorted best-first.
 
     Safe to re-run -- db.save_lead() dedupes on (source, external_id,
     candidate_id), so already-seen postings won't be re-inserted or
@@ -36,7 +38,12 @@ def find_leads(
     logger.info("Searching %d role queries across job boards...", len(queries))
 
     raw_leads = search_all_boards(queries, location=location, max_results_per_board=max_per_query)
-    logger.info("Found %d raw leads before scoring/dedup", len(raw_leads))
+    logger.info("Found %d raw leads from job boards", len(raw_leads))
+
+    if include_company_boards:
+        company_leads = search_watched_companies()
+        logger.info("Found %d raw leads from watched company boards", len(company_leads))
+        raw_leads.extend(company_leads)
 
     scored: list[ScoredLead] = []
     new_count = 0

@@ -1,0 +1,1 @@
+python run_manual_lead.py <candidate_id> --title "..." --company "..." --description "..." 

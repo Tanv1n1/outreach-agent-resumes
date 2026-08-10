@@ -16,11 +16,10 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-7s  %(name)s  |  %(message)s",
     datefmt="%H:%M:%S",
 )
-
 logger = logging.getLogger(__name__)
 
 from core.db import init_db, get_profile
-from core.models import CandidateProfile
+from core.models import CandidateProfile, ScoredLead
 from services.lead_finder.finder import find_leads
 
 if __name__ == "__main__":
@@ -60,7 +59,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     print(f"\n{'='*70}\nTop {min(len(leads), 10)} leads:\n{'='*70}", flush=True)
-    for i, sl in enumerate(leads[:10], 1):
+    for i, sl in enumerate[ScoredLead](leads[:10], 1):
         print(f"\n{i}. [{sl.score}] {sl.lead.title} @ {sl.lead.company} "
               f"({sl.lead.source}, {sl.lead.location or 'n/a'})", flush=True)
         for r in sl.reasons:
