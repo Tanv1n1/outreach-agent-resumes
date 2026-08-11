@@ -1,0 +1,11 @@
+{
+    "greenhouse": [
+      "stripe",
+      "notion",
+      "razorpay"
+    ],
+    "lever": [
+      "netflix",
+      "postman"
+    ]
+  }

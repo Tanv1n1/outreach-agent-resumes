@@ -34,10 +34,21 @@ WATCHED_COMPANIES_PATH = Path(__file__).parent.parent.parent / "config" / "watch
 
 def load_watched_companies() -> dict:
     if not WATCHED_COMPANIES_PATH.exists():
-        logger.warning("watched_companies.json not found at %s", WATCHED_COMPANIES_PATH)
+        logger.warning("watched_companies.json not found at %s -- skipping company boards", WATCHED_COMPANIES_PATH)
         return {"greenhouse": [], "lever": []}
-    with open(WATCHED_COMPANIES_PATH) as f:
-        data = json.load(f)
+    try:
+        with open(WATCHED_COMPANIES_PATH) as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        # Non-fatal by design -- a broken/empty config file here shouldn't
+        # take down job board search results that already succeeded.
+        # Common cause: the file is empty (0 bytes) -- happens if it got
+        # overwritten/truncated during a copy/save.
+        logger.warning(
+            "watched_companies.json is empty or invalid JSON (%s) -- "
+            "skipping company boards this run. Check the file isn't empty.", e,
+        )
+        return {"greenhouse": [], "lever": []}
     return {"greenhouse": data.get("greenhouse", []), "lever": data.get("lever", [])}
 
 
