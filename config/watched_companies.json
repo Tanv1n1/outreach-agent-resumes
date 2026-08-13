@@ -31,5 +31,53 @@
     "palantir",
     "cred",
     "meesho"
-  ]
+  ],
+  "_unverified_candidates": {
+    "_comment": "Well-known tech companies commonly known to use Greenhouse or Lever, based on general knowledge -- NOT individually confirmed by a live API check the way the entries above were. Test each one (move it up, run the tool, check the logs) before trusting it. Company name and actual ATS slug frequently differ.",
+    "likely_greenhouse": [
+      "airbnb",
+      "doordash",
+      "coinbase",
+      "robinhood",
+      "asana",
+      "dropbox",
+      "figma",
+      "gitlab",
+      "twitch",
+      "pinterest",
+      "reddit",
+      "instacart",
+      "flexport",
+      "brex",
+      "gusto",
+      "affirm",
+      "samsara"
+    ],
+    "likely_lever": [
+      "netflix",
+      "shopify",
+      "canva",
+      "eventbrite",
+      "github",
+      "yelp",
+      "box",
+      "postmates",
+      "quora",
+      "brex"
+    ],
+    "likely_indian_startups_unconfirmed_platform": [
+      "Zerodha",
+      "CRED",
+      "Meesho",
+      "Groww",
+      "PhonePe",
+      "Zepto",
+      "Freshworks",
+      "Postman",
+      "InMobi",
+      "Swiggy",
+      "Zomato",
+      "Unacademy"
+    ]
+  }
 }

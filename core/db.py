@@ -69,6 +69,11 @@ def init_db():
                 decided_at      TEXT,                       -- when user approved/rejected -- drives the 48h expiry check
                 UNIQUE(source, external_id, candidate_id)    -- re-running a search won't duplicate the same posting
             );
+
+            CREATE TABLE IF NOT EXISTS telegram_config (
+                key    TEXT PRIMARY KEY,
+                value  TEXT NOT NULL
+            );
         """)
 
 
@@ -162,3 +167,27 @@ def update_lead_status(lead_id: int, status: str):
             "UPDATE leads SET status = ?, decided_at = CURRENT_TIMESTAMP WHERE id = ?",
             (status, lead_id),
         )
+
+
+def get_lead(lead_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def set_telegram_chat_id(chat_id: int):
+    """Stored once, the first time the user sends /start to the bot --
+    there's no way to know their chat_id in advance. Single-user system,
+    so a single stored value (not per-candidate) is the right shape."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO telegram_config (key, value) VALUES ('chat_id', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (str(chat_id),),
+        )
+
+
+def get_telegram_chat_id() -> int | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM telegram_config WHERE key = 'chat_id'").fetchone()
+        return int(row["value"]) if row else None

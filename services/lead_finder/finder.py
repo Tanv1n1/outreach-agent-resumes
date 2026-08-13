@@ -45,6 +45,26 @@ def find_leads(
         logger.info("Found %d raw leads from watched company boards", len(company_leads))
         raw_leads.extend(company_leads)
 
+    # Dedupe BEFORE scoring, not just at the DB layer -- the same posting
+    # can legitimately match multiple role queries (e.g. "Product Manager"
+    # and "Program Manager" both hitting one WeWorkRemotely listing), which
+    # without this produces the same lead scored and shown twice in one run
+    # even though db.save_lead()'s UNIQUE constraint correctly rejects the
+    # second insert. Confirmed bug from a real run: Reddit's GPM listing
+    # appeared twice, identical, in the results.
+    seen = set()
+    deduped_leads = []
+    for lead in raw_leads:
+        key = (lead.source, lead.external_id or lead.url)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_leads.append(lead)
+    if len(deduped_leads) < len(raw_leads):
+        logger.info("Deduped %d repeat leads (matched by multiple role queries)",
+                     len(raw_leads) - len(deduped_leads))
+    raw_leads = deduped_leads
+
     scored: list[ScoredLead] = []
     new_count = 0
     for lead in raw_leads:
