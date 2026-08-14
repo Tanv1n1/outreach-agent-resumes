@@ -31,6 +31,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 from core import db
 from config import settings
+from services.message_gen.drafter import generate_message
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,19 @@ async def _pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"{count} lead(s) awaiting your decision.")
 
 
+def _draft_keyboard(lead_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("📤 Approve to send", callback_data=f"senddraft:{lead_id}"),
+        InlineKeyboardButton("🔄 Regenerate", callback_data=f"redraft:{lead_id}"),
+        InlineKeyboardButton("🗑️ Discard", callback_data=f"discard:{lead_id}"),
+    ]])
+
+
+def _format_draft_message(draft: dict) -> str:
+    subject_line = f"<b>Subject:</b> {draft['subject']}\n\n" if draft.get("subject") else ""
+    return f"{subject_line}{draft['body']}"
+
+
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()   # stops the Telegram client's loading spinner
@@ -108,9 +122,27 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not lead:
         await query.edit_message_text("This lead no longer exists.")
         return
+
+    try:
+        if action in ("approve", "reject"):
+            await _handle_lead_decision(query, context, lead, action)
+        elif action in ("senddraft", "redraft", "discard"):
+            await _handle_draft_action(query, context, lead, action)
+    except Exception as e:
+        # python-telegram-bot's own internal error logger doesn't always
+        # propagate to our logging config (confirmed during testing --
+        # a failure here produced zero console output, not even a
+        # traceback). Catching broadly here so a bug is never silent:
+        # always both logged AND visible to the user in Telegram.
+        logger.exception("Callback handler failed for action=%s lead_id=%s", action, lead_id)
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"Something went wrong processing that: {type(e).__name__}: {e}",
+        )
+
+
+async def _handle_lead_decision(query, context, lead: dict, action: str):
     if lead["status"] != "new":
-        # already decided (e.g. double-tap, or decided from another device) --
-        # don't silently no-op, tell the user what's actually stored
         await query.edit_message_text(
             f"{query.message.text}\n\n— Already marked: {lead['status']}",
             parse_mode=None,
@@ -118,7 +150,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     new_status = "approved" if action == "approve" else "rejected"
-    db.update_lead_status(lead_id, new_status)
+    db.update_lead_status(lead["id"], new_status)
 
     marker = "✅ APPROVED" if new_status == "approved" else "❌ REJECTED"
     await query.edit_message_text(
@@ -126,7 +158,79 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
-    logger.info("Lead %s marked %s", lead_id, new_status)
+    logger.info("Lead %s marked %s", lead["id"], new_status)
+
+    if new_status == "approved":
+        await _generate_and_send_draft(query, context, lead)
+
+
+async def _generate_and_send_draft(query, context, lead: dict):
+    from core.models import CandidateProfile
+    profile_dict = db.get_profile(lead["candidate_id"])
+    if not profile_dict:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="Couldn't draft a message -- candidate profile not found.",
+        )
+        return
+
+    profile = CandidateProfile.from_dict(profile_dict)
+    await context.bot.send_message(chat_id=query.message.chat_id, text="Drafting a message for this one...")
+
+    try:
+        draft = generate_message(profile, lead)
+    except Exception as e:
+        logger.exception("Draft generation failed for lead %s", lead["id"])
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"Draft generation failed: {e}",
+        )
+        return
+
+    db.save_draft(lead["id"], lead["candidate_id"], draft["subject"], draft["body"], draft["channel"])
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=_format_draft_message(draft),
+        parse_mode="HTML",
+        reply_markup=_draft_keyboard(lead["id"]),
+    )
+
+
+async def _handle_draft_action(query, context, lead: dict, action: str):
+    if action == "discard":
+        db.update_draft_status(lead["id"], "discarded")
+        await query.edit_message_text(f"{query.message.text}\n\n<b>🗑️ DISCARDED</b>", parse_mode="HTML")
+        return
+
+    if action == "senddraft":
+        # Marks intent only -- actual sending is dispatch's job (not yet
+        # built). This deliberately stops short of contacting anyone;
+        # it's the last human checkpoint before that module exists.
+        db.update_draft_status(lead["id"], "approved_to_send")
+        await query.edit_message_text(
+            f"{query.message.text}\n\n<b>📤 APPROVED TO SEND</b>\n"
+            f"(Sending isn't wired up yet -- this is queued for when dispatch is built.)",
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "redraft":
+        from core.models import CandidateProfile
+        profile_dict = db.get_profile(lead["candidate_id"])
+        profile = CandidateProfile.from_dict(profile_dict)
+        await query.edit_message_text(f"{query.message.text}\n\n<i>Regenerating...</i>", parse_mode="HTML")
+        try:
+            draft = generate_message(profile, lead)
+        except Exception as e:
+            logger.exception("Redraft failed for lead %s", lead["id"])
+            await query.edit_message_text(f"Redraft failed: {e}")
+            return
+        db.save_draft(lead["id"], lead["candidate_id"], draft["subject"], draft["body"], draft["channel"])
+        await query.edit_message_text(
+            text=_format_draft_message(draft),
+            parse_mode="HTML",
+            reply_markup=_draft_keyboard(lead["id"]),
+        )
 
 
 def push_new_leads_sync(candidate_id: str):

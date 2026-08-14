@@ -74,6 +74,18 @@ def init_db():
                 key    TEXT PRIMARY KEY,
                 value  TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS message_drafts (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id       INTEGER NOT NULL,
+                candidate_id  TEXT NOT NULL,
+                subject       TEXT,                          -- null for non-email channels
+                body          TEXT NOT NULL,
+                channel       TEXT DEFAULT 'email',           -- email | linkedin
+                status        TEXT DEFAULT 'pending_review',  -- pending_review | approved_to_send | sent | discarded
+                created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(lead_id)                                -- one active draft per lead -- regenerate replaces it, doesn't stack
+            );
         """)
 
 
@@ -191,3 +203,30 @@ def get_telegram_chat_id() -> int | None:
     with get_conn() as conn:
         row = conn.execute("SELECT value FROM telegram_config WHERE key = 'chat_id'").fetchone()
         return int(row["value"]) if row else None
+
+
+def save_draft(lead_id: int, candidate_id: str, subject: str, body: str, channel: str = "email") -> int:
+    """UPSERT on lead_id -- regenerating a draft replaces the previous one
+    rather than stacking duplicates, since only the latest draft is ever
+    relevant (there's no history/versioning need here)."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO message_drafts (lead_id, candidate_id, subject, body, channel)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(lead_id) DO UPDATE SET
+                 subject = excluded.subject, body = excluded.body,
+                 channel = excluded.channel, status = 'pending_review'""",
+            (lead_id, candidate_id, subject, body, channel),
+        )
+        return cur.lastrowid
+
+
+def get_draft_by_lead(lead_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM message_drafts WHERE lead_id = ?", (lead_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_draft_status(lead_id: int, status: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE message_drafts SET status = ? WHERE lead_id = ?", (status, lead_id))
