@@ -82,6 +82,10 @@ contact or hiring manager, on the candidate's behalf.
 
 Rules:
 - Reference the SPECIFIC role and company by name -- never generic ("a role at your company").
+- NEVER use a placeholder like "[Hiring Manager Name]" or "[Name]" -- the
+  candidate does not know the recipient's name. Open with something that
+  doesn't require one: "Hi there," "Hi [Company] team," or just launching
+  straight into the first sentence with no greeting line at all.
 - Personalize using 1-2 concrete things from the candidate's actual background
   (a real skill, project, or achievement) that genuinely connects to what the
   role needs -- not a generic list of skills copy-pasted in.
@@ -100,15 +104,90 @@ No markdown fences, no commentary.
 
 
 def generate_message(profile: CandidateProfile, lead: dict) -> dict:
+    """Single-shot draft, no verification loop. Kept for callers that
+    explicitly want just one attempt (e.g. the Regenerate button, which
+    is itself a manual iteration -- looping automatically there would
+    fight the user's own judgment about when a draft is good enough)."""
     channel = _detect_channel(lead)
-    # timeout set explicitly -- an unbounded hang here would look
-    # identical to total silence in Telegram (no error, nothing happens),
-    # exactly the failure mode being debugged. Bounding it turns a silent
-    # hang into a real, visible TimeoutError after 30s.
-    client = Groq(api_key=settings.GROQ_API_KEY, timeout=30.0)
+    user_content = _build_user_content(profile, lead)
+    return _draft_once(channel, user_content)
 
+
+def generate_verified_message(profile: CandidateProfile, lead: dict, max_attempts: int = 3) -> dict:
+    """The critical-path version: drafts, then runs it through
+    rule_based_check + llm_verify (see verifier.py). On failure, the
+    specific issues found are fed back into the next attempt as explicit
+    correction instructions -- not just "try again", but "try again,
+    and specifically fix X". Loops up to max_attempts.
+
+    If it still hasn't passed after max_attempts, returns the last
+    attempt anyway with verification_passed=False and the remaining
+    issues attached -- a human should still see it and decide, rather
+    than the pipeline silently discarding a draft that might be fine
+    but tripped an overly cautious judge call.
+    """
+    from services.message_gen.verifier import rule_based_check, llm_verify
+
+    channel = _detect_channel(lead)
+    user_content = _build_user_content(profile, lead)
+    profile_summary = _build_profile_context(profile)
+    lead_summary = _build_lead_context(lead)
+
+    feedback = None
+    result = None
+    all_issues: list[str] = []
+
+    for attempt in range(1, max_attempts + 1):
+        result = _draft_once(channel, user_content, feedback=feedback)
+
+        rule_issues = rule_based_check(result["body"])
+        if rule_issues:
+            logger.info("Attempt %d failed rule-based check: %s", attempt, rule_issues)
+            all_issues = rule_issues
+            feedback = _format_feedback(rule_issues)
+            continue
+
+        try:
+            verdict = llm_verify(profile_summary, lead_summary, result["body"])
+        except Exception as e:
+            # Judge call failing shouldn't lose an otherwise-fine draft --
+            # log it, treat this attempt as unverified-but-passable, stop here.
+            logger.warning("Verifier LLM call failed (%s) -- returning draft unverified", e)
+            result["verification_passed"] = None
+            result["verification_attempts"] = attempt
+            result["verification_issues"] = []
+            return result
+
+        if verdict.passes:
+            logger.info("Attempt %d passed verification (sounds_human=%s, is_specific=%s)",
+                        attempt, verdict.sounds_human, verdict.is_specific)
+            result["verification_passed"] = True
+            result["verification_attempts"] = attempt
+            result["verification_issues"] = []
+            return result
+
+        logger.info("Attempt %d failed LLM verification: %s", attempt, verdict.issues)
+        all_issues = verdict.issues
+        feedback = _format_feedback(verdict.issues)
+
+    # Exhausted attempts -- return the last draft anyway, flagged clearly
+    logger.warning("Draft never passed verification after %d attempts: %s", max_attempts, all_issues)
+    result["verification_passed"] = False
+    result["verification_attempts"] = max_attempts
+    result["verification_issues"] = all_issues
+    return result
+
+
+def _format_feedback(issues: list[str]) -> str:
+    return (
+        "Your previous attempt had these specific problems -- fix them directly, "
+        "don't just paraphrase around them:\n" + "\n".join(f"- {i}" for i in issues)
+    )
+
+
+def _build_lead_context(lead: dict) -> str:
     matched_skills = json.loads(lead.get("matched_skills") or "[]")
-    lead_context = (
+    return (
         f"Role: {lead['title']}\n"
         f"Company: {lead['company']}\n"
         f"Location: {lead.get('location') or 'n/a'}\n"
@@ -116,28 +195,36 @@ def generate_message(profile: CandidateProfile, lead: dict) -> dict:
         f"Job description (may be partial): {_strip_html(lead.get('description', ''))[:1500]}"
     )
 
-    user_content = f"CANDIDATE:\n{_build_profile_context(profile)}\n\nROLE:\n{lead_context}"
 
+def _build_user_content(profile: CandidateProfile, lead: dict) -> str:
+    return f"CANDIDATE:\n{_build_profile_context(profile)}\n\nROLE:\n{_build_lead_context(lead)}"
+
+
+def _draft_once(channel: str, user_content: str, feedback: str = None) -> dict:
+    client = Groq(api_key=settings.GROQ_API_KEY, timeout=30.0)
     model = settings.GROQ_MODEL
+
+    messages = [
+        {"role": "system", "content": _build_system_prompt(channel)},
+        {"role": "user", "content": user_content},
+    ]
+    if feedback:
+        messages.append({"role": "user", "content": feedback})
+
     try:
-        data = _run_draft(client, model, channel, user_content)
+        data = _run_draft_messages(client, model, messages)
     except Exception as e:
         logger.warning("Primary model %s failed (%s), trying fallback", model, e)
-        data = _run_draft(client, settings.GROQ_FALLBACK_MODEL, channel, user_content)
+        data = _run_draft_messages(client, settings.GROQ_FALLBACK_MODEL, messages)
 
     return {"subject": data.subject, "body": data.body, "channel": channel}
 
 
-def _run_draft(client: Groq, model: str, channel: str, user_content: str) -> MessageDraftSchema:
+def _run_draft_messages(client: Groq, model: str, messages: list) -> MessageDraftSchema:
     response = client.chat.completions.create(
         model=model,
-        temperature=0.4,   # a little variance is fine/desirable here, unlike
-                            # extraction -- identical wording every regenerate
-                            # would defeat the point of a "regenerate" button
+        temperature=0.4,
         response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": _build_system_prompt(channel)},
-            {"role": "user", "content": user_content},
-        ],
+        messages=messages,
     )
     return MessageDraftSchema.model_validate_json(response.choices[0].message.content)
