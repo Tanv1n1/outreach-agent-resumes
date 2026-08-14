@@ -31,7 +31,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 from core import db
 from config import settings
-from services.message_gen.drafter import generate_message
+from services.message_gen.drafter import generate_message, generate_verified_message
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,25 @@ def _draft_keyboard(lead_id: int) -> InlineKeyboardMarkup:
 
 def _format_draft_message(draft: dict) -> str:
     subject_line = f"<b>Subject:</b> {draft['subject']}\n\n" if draft.get("subject") else ""
-    return f"{subject_line}{draft['body']}"
+    status_line = _format_verification_status(draft)
+    return f"{subject_line}{draft['body']}{status_line}"
+
+
+def _format_verification_status(draft: dict) -> str:
+    passed = draft.get("verification_passed")
+    attempts = draft.get("verification_attempts")
+    if passed is True:
+        return f"\n\n<i>✓ Verified human-sounding (passed on attempt {attempts})</i>"
+    if passed is False:
+        issues = draft.get("verification_issues", [])
+        issues_text = "; ".join(issues[:2]) if issues else "unspecified"
+        return (
+            f"\n\n<i>⚠️ Did not fully pass verification after {attempts} attempts "
+            f"({issues_text}) -- review carefully before sending.</i>"
+        )
+    if passed is None:
+        return "\n\n<i>⚠️ Verification check itself failed (see logs) -- review carefully.</i>"
+    return ""
 
 
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -175,10 +193,10 @@ async def _generate_and_send_draft(query, context, lead: dict):
         return
 
     profile = CandidateProfile.from_dict(profile_dict)
-    await context.bot.send_message(chat_id=query.message.chat_id, text="Drafting a message for this one...")
+    await context.bot.send_message(chat_id=query.message.chat_id, text="Drafting a message for this one... (this includes a verification pass, may take ~15-30s)")
 
     try:
-        draft = generate_message(profile, lead)
+        draft = generate_verified_message(profile, lead)
     except Exception as e:
         logger.exception("Draft generation failed for lead %s", lead["id"])
         await context.bot.send_message(
