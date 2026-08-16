@@ -32,6 +32,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from core import db
 from config import settings
 from services.message_gen.drafter import generate_message, generate_verified_message
+from services.dispatch.dispatch import dispatch_lead
 
 logger = logging.getLogger(__name__)
 
@@ -113,8 +114,17 @@ def _format_draft_message(draft: dict) -> str:
 
 
 def _format_verification_status(draft: dict) -> str:
-    passed = draft.get("verification_passed")
+    # Sentinel default distinguishes "key never set" (the Regenerate button's
+    # single-shot path, generate_message, which skips verification BY DESIGN)
+    # from "key explicitly set to None" (generate_verified_message's judge
+    # call genuinely crashed). Using draft.get(key) alone conflates these --
+    # both return None, which produced a false "verification failed" warning
+    # on every ordinary Regenerate tap. Confirmed bug from a real run.
+    passed = draft.get("verification_passed", "_not_run")
     attempts = draft.get("verification_attempts")
+
+    if passed == "_not_run":
+        return "\n\n<i>(Single regenerate -- not re-verified. Use Approve to send once you're happy with it.)</i>"
     if passed is True:
         return f"\n\n<i>✓ Verified human-sounding (passed on attempt {attempts})</i>"
     if passed is False:
@@ -124,9 +134,25 @@ def _format_verification_status(draft: dict) -> str:
             f"\n\n<i>⚠️ Did not fully pass verification after {attempts} attempts "
             f"({issues_text}) -- review carefully before sending.</i>"
         )
-    if passed is None:
-        return "\n\n<i>⚠️ Verification check itself failed (see logs) -- review carefully.</i>"
-    return ""
+    # passed is None -- the judge call itself genuinely errored (see logs)
+    return "\n\n<i>⚠️ Verification check itself failed (see logs) -- review carefully.</i>"
+
+
+def _format_dispatch_result(result: dict) -> str:
+    method = result["method"]
+    if method == "auto_sent_to_hr":
+        return f"<b>✅ SENT</b> -- emailed directly to {result['sent_to']} (found in the posting)"
+    if method == "emailed_to_user":
+        note = " (fallback -- direct send failed)" if result.get("fallback_reason") else ""
+        return (
+            f"<b>📨 EMAILED TO YOU</b> -- no direct HR contact found, so the apply link "
+            f"was sent to {result['sent_to']}{note}. Check your inbox to apply."
+        )
+    if method == "manual_only":
+        return f"<b>👤 MANUAL</b> -- {result['detail']}"
+    if method in ("digest_failed",):
+        return f"<b>⚠️ COULD NOT SEND</b> -- {result['detail']} (check SMTP settings in .env)"
+    return f"<b>Dispatched</b> ({method})"
 
 
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -221,15 +247,25 @@ async def _handle_draft_action(query, context, lead: dict, action: str):
         return
 
     if action == "senddraft":
-        # Marks intent only -- actual sending is dispatch's job (not yet
-        # built). This deliberately stops short of contacting anyone;
-        # it's the last human checkpoint before that module exists.
-        db.update_draft_status(lead["id"], "approved_to_send")
-        await query.edit_message_text(
-            f"{query.message.text}\n\n<b>📤 APPROVED TO SEND</b>\n"
-            f"(Sending isn't wired up yet -- this is queued for when dispatch is built.)",
-            parse_mode="HTML",
-        )
+        draft = db.get_draft_by_lead(lead["id"])
+        if not draft:
+            await query.edit_message_text(f"{query.message.text}\n\n<b>⚠️ No draft found -- cannot send.</b>", parse_mode="HTML")
+            return
+
+        from core.models import CandidateProfile
+        profile_dict = db.get_profile(lead["candidate_id"])
+        profile = CandidateProfile.from_dict(profile_dict)
+
+        try:
+            result = dispatch_lead(lead, draft, profile)
+        except Exception as e:
+            logger.exception("Dispatch failed for lead %s", lead["id"])
+            await query.edit_message_text(f"{query.message.text}\n\n<b>⚠️ Dispatch failed: {e}</b>", parse_mode="HTML")
+            return
+
+        status_line = _format_dispatch_result(result)
+        await query.edit_message_text(f"{query.message.text}\n\n{status_line}", parse_mode="HTML")
+        logger.info("Lead %s dispatched: %s", lead["id"], result["method"])
         return
 
     if action == "redraft":

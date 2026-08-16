@@ -113,7 +113,7 @@ def generate_message(profile: CandidateProfile, lead: dict) -> dict:
     return _draft_once(channel, user_content)
 
 
-def generate_verified_message(profile: CandidateProfile, lead: dict, max_attempts: int = 3) -> dict:
+def generate_verified_message(profile: CandidateProfile, lead: dict, max_attempts: int = 2) -> dict:
     """The critical-path version: drafts, then runs it through
     rule_based_check + llm_verify (see verifier.py). On failure, the
     specific issues found are fed back into the next attempt as explicit

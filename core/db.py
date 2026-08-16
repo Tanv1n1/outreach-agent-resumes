@@ -82,7 +82,7 @@ def init_db():
                 subject       TEXT,                          -- null for non-email channels
                 body          TEXT NOT NULL,
                 channel       TEXT DEFAULT 'email',           -- email | linkedin
-                status        TEXT DEFAULT 'pending_review',  -- pending_review | approved_to_send | sent | discarded
+                status        TEXT DEFAULT 'pending_review',  -- pending_review | approved_to_send | sent | digested_to_user | digest_failed | manual_only | discarded
                 created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(lead_id)                                -- one active draft per lead -- regenerate replaces it, doesn't stack
             );

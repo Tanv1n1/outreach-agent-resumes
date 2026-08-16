@@ -45,3 +45,13 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")   # from @BotFather
 # No chat_id setting here on purpose -- it's captured dynamically the first
 # time the user sends /start (see core/db.py get/set_telegram_chat_id) since
 # there's no way to know it in advance.
+
+# --- Email dispatch (SMTP) ---
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER")             # the account actually sending mail
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")      # app password, not your real password (for Gmail etc.)
+SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", SMTP_USER)
+# Where "apply yourself" digest emails land -- defaults to the candidate's
+# own email from their parsed profile if not overridden here.
+NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL")
