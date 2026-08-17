@@ -24,11 +24,13 @@ Three real outcomes, no pretending a 4th exists:
 
 import re
 import logging
+from pathlib import Path
 
 from core import db
 from core.models import CandidateProfile
 from config import settings
 from services.dispatch.email_sender import send_email, EmailConfigError, EmailSendError
+from services.storage import backblaze_client as b2
 
 logger = logging.getLogger(__name__)
 
@@ -66,17 +68,52 @@ def dispatch_lead(lead: dict, draft: dict, profile: CandidateProfile) -> dict:
     stated_email = extract_stated_email(lead.get("description", ""))
 
     if stated_email:
+        resume_path = _resolve_resume_path(lead["candidate_id"])
         try:
-            message_id = send_email(stated_email, draft.get("subject") or f"Re: {lead['title']}", draft["body"])
+            message_id = send_email(
+                stated_email, draft.get("subject") or f"Re: {lead['title']}",
+                draft["body"], attachment_path=resume_path,
+            )
         except (EmailConfigError, EmailSendError) as e:
             logger.warning("Direct HR send failed for lead %s: %s", lead["id"], e)
             return _fallback_to_digest(lead, profile, reason=str(e))
 
         db.update_draft_status(lead["id"], "sent")
         db.set_sent_message_id(lead["id"], message_id)
-        return {"method": "auto_sent_to_hr", "sent_to": stated_email}
+        return {"method": "auto_sent_to_hr", "sent_to": stated_email, "resume_attached": bool(resume_path)}
 
     return _fallback_to_digest(lead, profile)
+
+
+def _resolve_resume_path(candidate_id: str) -> str | None:
+    """Finds an actual resume file to attach: tries the local path first
+    (fast, no network), falls back to downloading from B2 if the local
+    file is gone (e.g. running on a different machine, or the scratch
+    file was cleaned up). Returns None if neither works -- the caller
+    treats that as "send without an attachment", not a hard failure."""
+    upload = db.get_latest_resume_upload(candidate_id)
+    if not upload:
+        logger.warning("No resume upload record found for candidate %s -- sending without attachment", candidate_id)
+        return None
+
+    local_path = upload.get("file_path")
+    if local_path and Path(local_path).exists():
+        return local_path
+
+    b2_key = upload.get("b2_key")
+    if not b2_key:
+        logger.warning("Resume for candidate %s missing locally and no B2 backup exists -- sending without attachment", candidate_id)
+        return None
+
+    dest_dir = Path(settings.LOCAL_UPLOAD_DIR) / "_dispatch_cache"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / Path(b2_key).name
+    try:
+        b2.download_resume(b2_key, str(dest_path))
+        return str(dest_path)
+    except Exception as e:
+        logger.warning("Could not fetch resume from B2 for candidate %s (%s) -- sending without attachment", candidate_id, e)
+        return None
 
 
 def _fallback_to_digest(lead: dict, profile: CandidateProfile, reason: str = None) -> dict:

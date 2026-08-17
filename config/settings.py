@@ -42,9 +42,7 @@ LOCAL_UPLOAD_DIR = os.environ.get("LOCAL_UPLOAD_DIR", "data/uploads")  # scratch
 
 # --- Telegram (notifier/approval bot) ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")   # from @BotFather
-# No chat_id setting here on purpose -- it's captured dynamically the first
-# time the user sends /start (see core/db.py get/set_telegram_chat_id) since
-# there's no way to know it in advance.
+TELEGRAM_AUTH_CODE = os.environ.get("TELEGRAM_AUTH_CODE")
 
 # --- Email dispatch (SMTP) ---
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")

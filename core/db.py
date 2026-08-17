@@ -303,3 +303,19 @@ def mark_followup_sent(lead_id: int):
             "UPDATE message_drafts SET follow_up_sent_at = CURRENT_TIMESTAMP WHERE lead_id = ?",
             (lead_id,),
         )
+
+
+def get_latest_resume_upload(candidate_id: str) -> dict | None:
+    """Most recent successfully-parsed resume upload for a candidate --
+    used by dispatch.py to find the actual file to attach to outgoing
+    HR emails. Returns both the local file_path and b2_key so the caller
+    can fall back to B2 if the local file no longer exists (e.g. running
+    on a different machine, or the local scratch file got cleaned up)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT * FROM resume_uploads
+               WHERE candidate_id = ? AND status = 'parsed'
+               ORDER BY uploaded_at DESC LIMIT 1""",
+            (candidate_id,),
+        ).fetchone()
+        return dict(row) if row else None

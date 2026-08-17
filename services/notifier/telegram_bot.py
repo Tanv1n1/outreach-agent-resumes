@@ -58,6 +58,25 @@ def _lead_keyboard(lead_id: int) -> InlineKeyboardMarkup:
 
 
 async def _start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Auth gate -- see settings.TELEGRAM_AUTH_CODE for why this exists.
+    # Without it, anyone who finds this bot's username can /start it and
+    # silently redirect all future leads/drafts/replies to themselves.
+    if settings.TELEGRAM_AUTH_CODE:
+        if not context.args or context.args[0] != settings.TELEGRAM_AUTH_CODE:
+            await update.message.reply_text(
+                "This bot requires an auth code. Usage: /start <your-code>"
+            )
+            logger.warning(
+                "Rejected /start attempt from chat_id=%s (wrong or missing auth code)",
+                update.effective_chat.id,
+            )
+            return
+    else:
+        logger.warning(
+            "TELEGRAM_AUTH_CODE is not set -- /start will accept ANYONE. "
+            "Set TELEGRAM_AUTH_CODE in .env before relying on this bot."
+        )
+
     chat_id = update.effective_chat.id
     db.set_telegram_chat_id(chat_id)
     await update.message.reply_text(
@@ -208,7 +227,8 @@ def _format_verification_status(draft: dict) -> str:
 def _format_dispatch_result(result: dict) -> str:
     method = result["method"]
     if method == "auto_sent_to_hr":
-        return f"<b>✅ SENT</b> -- emailed directly to {result['sent_to']} (found in the posting)"
+        attach_note = "with resume attached" if result.get("resume_attached") else "⚠️ resume NOT attached (check logs)"
+        return f"<b>✅ SENT</b> -- emailed directly to {result['sent_to']} ({attach_note})"
     if method == "emailed_to_user":
         note = " (fallback -- direct send failed)" if result.get("fallback_reason") else ""
         return (
@@ -224,6 +244,13 @@ def _format_dispatch_result(result: dict) -> str:
 
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+
+    registered_chat_id = db.get_telegram_chat_id()
+    if registered_chat_id and update.effective_chat.id != registered_chat_id:
+        await query.answer("Unauthorized.", show_alert=True)
+        logger.warning("Rejected callback from unauthorized chat_id=%s", update.effective_chat.id)
+        return
+
     await query.answer()   # stops the Telegram client's loading spinner
 
     action, lead_id_str = query.data.split(":", 1)
