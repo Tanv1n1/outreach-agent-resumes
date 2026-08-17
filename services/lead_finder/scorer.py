@@ -15,11 +15,17 @@ ERP integration, B2B SaaS), not just an exact "Product Manager" title hit.
 
 import re
 from core.models import CandidateProfile, JobLead, ScoredLead
+from services.lead_finder.experience_matcher import score_experience_match
 
-# Weights sum to 100 -- skills dominate on purpose (see module docstring).
-WEIGHT_SKILLS = 55
-WEIGHT_TITLE = 20
-WEIGHT_DOMAIN = 25
+# Weights sum to 100 -- skills still dominate, but experience is now a
+# real factor instead of being ignored entirely (see experience_matcher.py
+# module docstring for why this was added: a 2-year candidate and an
+# 8-years-required Staff role used to score identically as long as
+# skill/domain words overlapped, which is exactly backwards).
+WEIGHT_SKILLS = 40
+WEIGHT_TITLE = 15
+WEIGHT_DOMAIN = 20
+WEIGHT_EXPERIENCE = 25
 
 # Adjacent titles that should still count as a strong title-relevance hit
 # even if not an exact match against titles_held. Extend as needed --
@@ -38,8 +44,9 @@ def score_lead(profile: CandidateProfile, lead: JobLead) -> ScoredLead:
     skill_score, matched_skills = _score_skills(profile, text)
     title_score, title_reason = _score_title(profile, lead.title)
     domain_score, domain_reason = _score_domain(profile, text)
+    experience_score, experience_reason = _score_experience(profile, lead)
 
-    total = skill_score + title_score + domain_score
+    total = skill_score + title_score + domain_score + experience_score
 
     reasons = []
     if matched_skills:
@@ -50,6 +57,7 @@ def score_lead(profile: CandidateProfile, lead: JobLead) -> ScoredLead:
         reasons.append(title_reason)
     if domain_reason:
         reasons.append(domain_reason)
+    reasons.append(experience_reason)
     if not reasons:
         reasons.append("Weak match -- low skill/title/domain overlap")
 
@@ -60,6 +68,13 @@ def score_lead(profile: CandidateProfile, lead: JobLead) -> ScoredLead:
         reasons=reasons,
         candidate_id=profile.candidate_id,
     )
+
+
+def _score_experience(profile: CandidateProfile, lead: JobLead) -> tuple[float, str]:
+    exp_ratio, reason = score_experience_match(
+        profile.total_experience_years, lead.title, lead.description
+    )
+    return WEIGHT_EXPERIENCE * exp_ratio, reason
 
 
 def _score_skills(profile: CandidateProfile, text: str) -> tuple[float, list[str]]:
