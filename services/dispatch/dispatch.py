@@ -67,12 +67,13 @@ def dispatch_lead(lead: dict, draft: dict, profile: CandidateProfile) -> dict:
 
     if stated_email:
         try:
-            send_email(stated_email, draft.get("subject") or f"Re: {lead['title']}", draft["body"])
+            message_id = send_email(stated_email, draft.get("subject") or f"Re: {lead['title']}", draft["body"])
         except (EmailConfigError, EmailSendError) as e:
             logger.warning("Direct HR send failed for lead %s: %s", lead["id"], e)
             return _fallback_to_digest(lead, profile, reason=str(e))
 
         db.update_draft_status(lead["id"], "sent")
+        db.set_sent_message_id(lead["id"], message_id)
         return {"method": "auto_sent_to_hr", "sent_to": stated_email}
 
     return _fallback_to_digest(lead, profile)

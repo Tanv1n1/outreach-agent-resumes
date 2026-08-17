@@ -83,10 +83,38 @@ def init_db():
                 body          TEXT NOT NULL,
                 channel       TEXT DEFAULT 'email',           -- email | linkedin
                 status        TEXT DEFAULT 'pending_review',  -- pending_review | approved_to_send | sent | digested_to_user | digest_failed | manual_only | discarded
+                sent_message_id  TEXT,                        -- RFC Message-ID of the sent email -- used to match incoming replies via In-Reply-To/References
+                replied          INTEGER DEFAULT 0,
+                reply_classification TEXT,                    -- interested | not_interested | auto_reply | other
+                reply_snippet    TEXT,
+                follow_up_sent_at TEXT,
                 created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(lead_id)                                -- one active draft per lead -- regenerate replaces it, doesn't stack
             );
         """)
+    _migrate_message_drafts_columns()
+
+
+def _migrate_message_drafts_columns():
+    """Adds columns to message_drafts that were introduced after some users
+    already had the table created by an earlier version of this schema.
+    CREATE TABLE IF NOT EXISTS alone won't retrofit an existing table, so
+    this runs ALTER TABLE ADD COLUMN for each new column, silently skipping
+    ones that already exist (SQLite has no ADD COLUMN IF NOT EXISTS)."""
+    new_columns = [
+        ("sent_message_id", "TEXT"),
+        ("replied", "INTEGER DEFAULT 0"),
+        ("reply_classification", "TEXT"),
+        ("reply_snippet", "TEXT"),
+        ("follow_up_sent_at", "TEXT"),
+    ]
+    with get_conn() as conn:
+        for col_name, col_type in new_columns:
+            try:
+                conn.execute(f"ALTER TABLE message_drafts ADD COLUMN {col_name} {col_type}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise   # anything other than "already exists" is a real problem
 
 
 def save_profile(candidate_id: str, profile_json: str):
@@ -230,3 +258,48 @@ def get_draft_by_lead(lead_id: int) -> dict | None:
 def update_draft_status(lead_id: int, status: str):
     with get_conn() as conn:
         conn.execute("UPDATE message_drafts SET status = ? WHERE lead_id = ?", (status, lead_id))
+
+
+def set_sent_message_id(lead_id: int, message_id: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE message_drafts SET sent_message_id = ? WHERE lead_id = ?", (message_id, lead_id))
+
+
+def get_draft_by_message_id(message_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM message_drafts WHERE sent_message_id = ?", (message_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def mark_reply_received(lead_id: int, classification: str, snippet: str):
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE message_drafts SET replied = 1, reply_classification = ?,
+               reply_snippet = ? WHERE lead_id = ?""",
+            (classification, snippet, lead_id),
+        )
+
+
+def get_sent_awaiting_reply(candidate_id: str) -> list[dict]:
+    """Drafts that were actually sent (auto_sent_to_hr path only -- digest
+    emails to the user don't get a real HR reply to wait for) and haven't
+    been replied to yet. Feeds both the reply-poll matching step and the
+    follow-up-after-silence step."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM message_drafts
+               WHERE candidate_id = ? AND status = 'sent' AND replied = 0
+               AND sent_message_id IS NOT NULL""",
+            (candidate_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_followup_sent(lead_id: int):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE message_drafts SET follow_up_sent_at = CURRENT_TIMESTAMP WHERE lead_id = ?",
+            (lead_id,),
+        )

@@ -64,7 +64,9 @@ async def _start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Connected. I'll send job leads here for your approval.\n\n"
         "Commands:\n"
         "/newleads <candidate_id> — push any leads awaiting approval\n"
-        "/pending <candidate_id> — count of leads still waiting on you"
+        "/pending <candidate_id> — count of leads still waiting on you\n"
+        "/checkreplies <candidate_id> — check inbox for HR replies\n"
+        "/followups <candidate_id> — draft follow-ups for silent leads"
     )
     logger.info("Telegram chat_id registered: %s", chat_id)
 
@@ -97,6 +99,71 @@ async def _pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     count = len(db.get_leads(context.args[0], status="new"))
     await update.message.reply_text(f"{count} lead(s) awaiting your decision.")
+
+
+async def _checkreplies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /checkreplies <candidate_id>")
+        return
+    from services.reply_watcher.imap_poll import check_for_replies
+
+    await update.message.reply_text("Checking inbox for replies...")
+    try:
+        results = check_for_replies(context.args[0])
+    except Exception as e:
+        logger.exception("checkreplies failed")
+        await update.message.reply_text(f"Reply check failed: {e}")
+        return
+
+    if not results:
+        await update.message.reply_text("No new replies found.")
+        return
+
+    for r in results:
+        emoji = {"interested": "🎉", "not_interested": "❌", "auto_reply": "🤖", "other": "❔"}.get(r["classification"], "❔")
+        await update.message.reply_text(
+            f"{emoji} Reply on lead #{r['lead_id']} from {r['from_']}\n"
+            f"Classification: <b>{r['classification']}</b>\n{r['summary']}",
+            parse_mode="HTML",
+        )
+
+
+async def _followups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /followups <candidate_id>")
+        return
+    from core.models import CandidateProfile
+    from services.reply_watcher.followup import find_leads_needing_followup, draft_followup
+
+    candidate_id = context.args[0]
+    due = find_leads_needing_followup(candidate_id)
+    if not due:
+        await update.message.reply_text("No leads due for a follow-up right now.")
+        return
+
+    profile_dict = db.get_profile(candidate_id)
+    profile = CandidateProfile.from_dict(profile_dict)
+
+    await update.message.reply_text(f"Drafting {len(due)} follow-up(s)...")
+    for draft_row in due:
+        lead = db.get_lead(draft_row["lead_id"])
+        if not lead:
+            continue
+        try:
+            followup = draft_followup(profile, lead, draft_row)
+        except Exception as e:
+            logger.exception("Follow-up draft failed for lead %s", lead["id"])
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Follow-up draft failed for lead {lead['id']}: {e}")
+            continue
+
+        db.save_draft(lead["id"], candidate_id, followup["subject"], followup["body"], followup["channel"])
+        db.mark_followup_sent(lead["id"])
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"<b>Follow-up for:</b> {lead['title']} @ {lead['company']}\n\n{_format_draft_message(followup)}",
+            parse_mode="HTML",
+            reply_markup=_draft_keyboard(lead["id"]),
+        )
 
 
 def _draft_keyboard(lead_id: int) -> InlineKeyboardMarkup:
@@ -322,6 +389,33 @@ def push_new_leads_sync(candidate_id: str):
     logger.info("Pushed %d leads to Telegram", len(leads))
 
 
+def push_draft_sync(lead: dict, draft: dict):
+    """Same non-bot sync pattern as push_new_leads_sync, for a single
+    drafted message -- used by run_reply_watcher.py so a follow-up
+    drafted outside of an interactive Telegram session (e.g. a scheduled
+    task) still actually lands in the chat with its approve/regenerate
+    buttons, instead of just sitting in the database unseen."""
+    import asyncio
+    from telegram import Bot
+
+    chat_id = db.get_telegram_chat_id()
+    if not chat_id:
+        logger.warning("No Telegram chat_id on file yet -- message the bot /start first")
+        return
+
+    async def _push():
+        bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"<b>Follow-up for:</b> {lead['title']} @ {lead['company']}\n\n{_format_draft_message(draft)}",
+            parse_mode="HTML",
+            reply_markup=_draft_keyboard(lead["id"]),
+        )
+
+    asyncio.run(_push())
+    logger.info("Pushed follow-up draft for lead %s to Telegram", lead["id"])
+
+
 def build_app() -> Application:
     if not settings.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set in .env -- get one from @BotFather")
@@ -330,5 +424,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("newleads", _newleads))
     app.add_handler(CommandHandler("pending", _pending))
+    app.add_handler(CommandHandler("checkreplies", _checkreplies))
+    app.add_handler(CommandHandler("followups", _followups))
     app.add_handler(CallbackQueryHandler(_handle_callback))
     return app

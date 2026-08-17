@@ -55,3 +55,14 @@ SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", SMTP_USER)
 # Where "apply yourself" digest emails land -- defaults to the candidate's
 # own email from their parsed profile if not overridden here.
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL")
+
+# --- IMAP (reply_watcher -- polls for HR replies) ---
+# Same account as SMTP_USER/SMTP_PASSWORD for most providers (Gmail app
+# passwords work for both). Separate host/port since IMAP and SMTP use
+# different servers even on the same provider.
+IMAP_HOST = os.environ.get("IMAP_HOST", "imap.gmail.com")
+IMAP_PORT = int(os.environ.get("IMAP_PORT", "993"))
+
+# Follow-up timing: how many days of silence before a follow-up draft
+# gets generated for review.
+FOLLOWUP_AFTER_DAYS = int(os.environ.get("FOLLOWUP_AFTER_DAYS", "5"))
